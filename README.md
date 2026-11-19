@@ -2,7 +2,7 @@
 
 **Trạng thái: V2 – bản thử nghiệm; không cam kết chính xác 100% hoặc độ trễ cố định.**
 
-Ứng dụng chạy độc lập, không sửa bộ nhớ hay file game, không bypass anti-cheat. Mở game ở chế độ cửa sổ/borderless, mở GameTransAI, chọn cửa sổ game và nhấn **BẮT ĐẦU DỊCH TỰ ĐỘNG**. Không phải khoanh bất cứ vùng OCR nào.
+Ứng dụng chạy độc lập, không sửa bộ nhớ hay file game, không bypass anti-cheat. Mở game ở chế độ cửa sổ/borderless, mở GameTransAI và chọn cửa sổ game trong danh sách: ứng dụng tự bắt đầu dịch. Bạn có thể nhấn **BẮT ĐẦU DỊCH TỰ ĐỘNG** nếu muốn khởi động lại bằng nút thủ công. Không phải khoanh bất cứ vùng OCR nào.
 
 ## Cách hoạt động
 

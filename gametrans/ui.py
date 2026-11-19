@@ -134,6 +134,7 @@ class GameTransWindow(QMainWindow):
         sv = QVBoxLayout(source)
         self.window_select = QComboBox()
         self.window_select.currentIndexChanged.connect(self.on_window_selected)
+        self.window_select.activated.connect(self._start_from_dropdown)
         sv.addWidget(self.window_select)
         refresh = QPushButton("Làm mới danh sách game")
         refresh.clicked.connect(self.refresh_windows)
@@ -243,6 +244,12 @@ class GameTransWindow(QMainWindow):
         self.glossary_edit.setPlainText("\n".join(f"{k} = {v}" for k, v in self.profile.glossary.items()))
         self.counter.setText(f"Đã lưu: {self.cache.count(self.profile.name):,} câu dịch")
         self.start_btn.setEnabled(not self.running)
+
+    def _start_from_dropdown(self, index):
+        # An explicit selection is the one-click 'select game and translate' flow.
+        # This also fires when the user selects the already highlighted window.
+        if self.hwnd and not self.running:
+            self.start()
 
     def save_profile(self):
         if not self.hwnd:

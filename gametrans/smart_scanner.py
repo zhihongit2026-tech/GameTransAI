@@ -99,7 +99,18 @@ class SmartScanEngine(ScanEngine):
         # Resolved results are never allowed to survive a profile/glossary switch.
         now = time.monotonic()
         for source in {o.source for o in self.observations}:
-            if source in self.resolved or source in self.pending or now < self.error_until.get(source, 0):
+            if source in self.resolved:
+                continue
+            # New TM/glossary terms can resolve immediately even when an older
+            # online attempt failed or the provider is currently rate-limited.
+            fast = getattr(self.translator, "fast_lookup", None)
+            result = fast(profile.name, source, profile.glossary) if callable(fast) else None
+            if result:
+                self.resolved[source] = result
+                self.error_until.pop(source, None)
+                self.last_warning = ""
+                continue
+            if source in self.pending or now < self.error_until.get(source, 0):
                 continue
             if len(self.pending) >= self.max_pending:
                 break

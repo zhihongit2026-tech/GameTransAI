@@ -32,6 +32,12 @@ UI_TERMS = {
     "保存设置": "Lưu cài đặt", "温馨提示": "Lưu ý", "确定": "Xác nhận",
     "开始游戏": "Bắt đầu chơi", "退出游戏": "Thoát game",
     "魂师": "Hồn Sư", "魂环": "Hồn Hoàn", "魂力": "Hồn lực",
+    # V3.1: labels found in the user's Douluo character-creation screenshot.
+    "控制": "Khống chế", "毒系": "Hệ Độc", "魔法": "Ma pháp",
+    "重新共鸣": "Cộng hưởng lại", "武魂融合": "Dung hợp Võ Hồn",
+    "选择": "Lựa chọn", "角色": "Nhân vật", "技能": "Kỹ năng",
+    "背包": "Túi đồ", "任务": "Nhiệm vụ", "确认": "Xác nhận",
+    "取消": "Hủy", "返回": "Quay lại", "战斗": "Chiến đấu",
     "当前服务器已爆满，请选择其他区域进行登陆": "Máy chủ hiện đã đầy, hãy chọn khu vực khác để đăng nhập",
 }
 
@@ -55,13 +61,24 @@ class OnlineRateGate:
         self.fails = 0
 
     def permit(self):
+        """Reserve the next online slot; normal pacing must not discard a label.
+
+        Only a genuine provider cooldown is an error. Requests for different
+        labels wait their turn instead of failing immediately and being ignored
+        by the OCR engine for the following 20 seconds.
+        """
         with self.lock:
             now = self.clock()
             if now < self.cooldown_until:
                 raise RateLimitError("Dịch online đang tạm nghỉ do giới hạn yêu cầu")
-            if now < self.next_allowed:
-                raise RateLimitError("Đang giới hạn tốc độ gọi dịch online")
-            self.next_allowed = now + self.interval
+            slot = max(now, self.next_allowed)
+            self.next_allowed = slot + self.interval
+        wait = max(0.0, slot - now)
+        if wait:
+            time.sleep(wait)
+        with self.lock:
+            if self.clock() < self.cooldown_until:
+                raise RateLimitError("Dịch online đang tạm nghỉ do giới hạn yêu cầu")
 
     def failure(self, exc):
         msg = str(exc).lower()
@@ -95,6 +112,44 @@ class SmartTranslator:
 
     def set_online_enabled(self, value: bool):
         self.online_enabled = bool(value)
+
+    def ollama_status(self, timeout=1.5):
+        """Read-only local health check; never installs or downloads a model."""
+        try:
+            with urlopen(self.url + "/api/tags", timeout=timeout) as reply:
+                payload = json.loads(reply.read().decode("utf-8"))
+            names = [str(item.get("name", "")) for item in payload.get("models", [])]
+            if self.model not in names:
+                return False, "Ollama đang chạy nhưng thiếu mô hình " + self.model
+            self._local_blocked_until = 0.0
+            return True, "AI offline sẵn sàng: " + self.model
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False, "Chưa kết nối được Ollama trên máy này"
+
+    def fast_lookup(self, profile: str, source: str, glossary: dict[str, str]):
+        """Resolve local TM, glossary and built-in game labels with no AI/network.
+
+        Returns (translation, origin) or None. Called on the OCR worker so
+        known labels can appear immediately even during a Google rate limit.
+        """
+        source = normalize_source(source)
+        if not source or not HAN.search(source):
+            return None
+        if source in glossary:
+            return glossary[source], "glossary"
+        for p, provider in ((profile, "tm"), ("*", "tm"),
+                            (profile, "v3-offline"), (profile, "v3-online"),
+                            (profile, "google-zh-vi")):
+            hit = self.cache.get(p, provider, source)
+            if hit:
+                return hit, "cache/" + provider
+        if source in UI_TERMS:
+            return UI_TERMS[source], "ui-lexicon"
+        # OCR can include a small decorative separator beside game menu labels.
+        simpler = source.strip(" •·:：-—【】[]()（）\t\r\n")
+        if simpler in UI_TERMS:
+            return UI_TERMS[simpler], "ui-lexicon"
+        return None
 
     def _local_model(self, text):
         if self.local_translate is not None:
@@ -142,16 +197,9 @@ class SmartTranslator:
             return "", "empty"
         if not HAN.search(source):
             return source, "unchanged"
-        if source in glossary:
-            return glossary[source], "glossary"
-        for p, provider in ((profile, "tm"), ("*", "tm"),
-                            (profile, "v3-offline"), (profile, "v3-online"),
-                            (profile, "google-zh-vi")):
-            old = self.cache.get(p, provider, source)
-            if old:
-                return old, "cache/" + provider
-        if source in UI_TERMS:
-            return UI_TERMS[source], "ui-lexicon"
+        fast = self.fast_lookup(profile, source, glossary)
+        if fast is not None:
+            return fast
         # An optional offline local model is tried *before* online fallback.
         try:
             value = self._local_model(source)

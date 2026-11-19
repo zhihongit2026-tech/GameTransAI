@@ -130,10 +130,13 @@ class SmartGameWindow(QMainWindow):
         self.status_label.setObjectName("status")
         self.status_label.setWordWrap(True)
         outer.addWidget(self.status_label)
-        self.offline_info=QLabel("Ưu tiên: Từ điển + Translation Memory + mô hình Ollama trên máy")
+        self.offline_info=QLabel("AI offline: chưa kiểm tra — nhấn 'Kiểm tra AI offline' trước khi chơi")
         self.offline_info.setObjectName("muted")
         self.offline_info.setWordWrap(True)
         outer.addWidget(self.offline_info)
+        self.check_offline_button=QPushButton("Kiểm tra AI offline (Ollama)")
+        self.check_offline_button.clicked.connect(self.check_offline)
+        outer.addWidget(self.check_offline_button)
         self.online_check=QCheckBox("Cho phép dịch online khi thiếu mô hình/bản dịch offline")
         self.online_check.setChecked(False)
         self.online_check.toggled.connect(self._provider_changed)
@@ -231,6 +234,16 @@ class SmartGameWindow(QMainWindow):
             self.profiles_store.save(self.profiles)
             self.engine.reset() if not self.busy else None
 
+    def check_offline(self):
+        ok, message = self.translator.ollama_status()
+        self.offline_info.setText(("✓ " if ok else "⚠ ") + message)
+        if not ok:
+            self.status("Không thể dịch câu mới khi chưa có Ollama/mô hình; "
+                        "từ điển và Translation Memory vẫn hoạt động.")
+        elif not self.running:
+            self.status("AI offline đã sẵn sàng. Chọn game để bắt đầu dịch.")
+        return ok
+
     def show_model_help(self):
         QMessageBox.information(self,"Dịch offline", "Để dịch mọi câu mới ngay trên máy:\n\n"
             "1. Cài Ollama cho Windows từ https://ollama.com\n"
@@ -323,11 +336,12 @@ class SmartGameWindow(QMainWindow):
         if result["errors"]:
             self.status(result["errors"][0])
         elif result["warning"] and not result["blocks"]:
-            self.status(result["warning"] + " — dùng TM hoặc bật mô hình offline.")
+            self.status(f"Đã đọc {result['detected']} cụm Trung, chưa có bản dịch. "
+                        + result["warning"] + " — hãy kiểm tra AI offline.")
         else:
-            self.status(f"Đã phát hiện {result['detected']} cụm Trung, "
-                        f"đang hiển thị {len(result['blocks'])} bản dịch; "
-                        f"đang xử lý {result['pending']} cụm.")
+            self.status(f"Đã đọc {result['detected']} cụm Trung, "
+                        f"hiển thị {len(result['blocks'])} bản dịch, "
+                        f"đợi dịch {result['pending']} cụm.")
         self.update_overlay_anchor()
 
     def scan_failed(self,message,epoch):

@@ -43,6 +43,34 @@ class TestSmartTranslator(unittest.TestCase):
             self.assertEqual(calls,['独特技能'])
             self.assertEqual(b[1],'cache/v3-offline')
 
+    def test_game_menu_labels_from_user_screenshot_work_without_model_or_google(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache=TranslationCache(Path(tmp)/'tm.sqlite')
+            called=[]
+            def missing(_):
+                called.append('offline')
+                raise TranslationUnavailable('Ollama not installed')
+            def google(_):
+                called.append('google')
+                raise RuntimeError('429 Too Many Requests')
+            translator=SmartTranslator(cache,local_translate=missing,
+                                       online_translate=google,online_enabled=True)
+            expected={'控制':'Khống chế','毒系':'Hệ Độc',
+                      '魔法':'Ma pháp','重新共鸣':'Cộng hưởng lại',
+                      '武魂融合':'Dung hợp Võ Hồn'}
+            for zh,vi in expected.items():
+                self.assertEqual(translator.translate('Douluo',zh,{})[0],vi)
+            self.assertEqual(translator.translate('Douluo','·控制·',{})[0],'Khống chế')
+            self.assertEqual(called,[])
+
+    def test_fast_glossary_can_override_pending_429(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache=TranslationCache(Path(tmp)/'tm.sqlite')
+            translator=SmartTranslator(cache,local_translate=lambda _:(_ for _ in ()).throw(TranslationUnavailable('none')))
+            self.assertIsNone(translator.fast_lookup('Douluo','独特法宝',{}))
+            cache.put('Douluo','tm','独特法宝','Pháp bảo độc đáo')
+            self.assertEqual(translator.fast_lookup('Douluo','独特法宝',{})[0],'Pháp bảo độc đáo')
+
     def test_no_network_without_opt_in(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache=TranslationCache(Path(tmp)/'tm.sqlite')
@@ -110,6 +138,21 @@ class TestSmartScanner(unittest.TestCase):
                 frame2=np.zeros((720,1280,3),dtype=np.uint8)
                 changed=engine.scan(25,profile,lambda _: (frame2,(0,0,1280,720)))
                 self.assertEqual(changed['geometry'][2:],(1280,720))
+            finally:
+                engine.close()
+
+    def test_unknown_model_still_displays_known_screenshot_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            translator=SmartTranslator(TranslationCache(Path(tmp)/'tm.sqlite'),
+                                       local_translate=lambda _: (_ for _ in ()).throw(TranslationUnavailable('missing')),
+                                       online_enabled=False)
+            engine=SmartScanEngine(translator,ocr=FakeOCR())
+            frame=np.zeros((360,640,3),dtype=np.uint8)
+            profile=GameProfile('Douluo','Douluo')
+            try:
+                result=engine.scan(1,profile,lambda _: (frame,(0,0,640,360)))
+                self.assertEqual([b.target for b in result['blocks']],['Cài đặt','Độ phân giải','Hồn Sư'])
+                self.assertEqual(result['pending'],0)
             finally:
                 engine.close()
 

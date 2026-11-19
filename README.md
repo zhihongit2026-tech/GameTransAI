@@ -49,3 +49,18 @@ python main.py
 ```
 
 GitHub Actions `Build Windows EXE V3` executes unit tests, **real RapidOCR on the submitted 斗罗大陆 settings screenshot**, PyInstaller `onedir`, bundled EXE OCR self-test, and an offscreen Qt startup smoke test, then publishes `GameTransAI-V3-Windows-x64` if all succeed. A passing CI build **does not** prove in-game rendering is compatible with your GPU/game: test it in the actual Windows game and send screenshots or logs for defects.
+
+
+## V3.1: no Vietnamese visible in the game
+
+If the game is captured but no translated overlay appears, inspect the local AI status in the launcher.
+**The EXE does NOT include the multi-GB Ollama model.** Install Ollama on Windows,
+run `ollama pull qwen2.5:3b`, and use **Kiểm tra AI offline (Ollama)**.
+Without a local model or imported TM, only known UI and game labels translate.
+Google's unofficial endpoint may return 429; enabling online does not guarantee
+service. The app now queues online calls in order and displays cached/TM/known
+labels immediately even during throttling. Use the local model for unseen text.
+
+The included built-in glossary covers the screenshot UI: `控制` → Khống chế,
+`毒系` → Hệ Độc, `魔法` → Ma pháp, `重新共鸣` → Cộng hưởng lại,
+`武魂融合` → Dung hợp Võ Hồn. This is **not** universal game translation.

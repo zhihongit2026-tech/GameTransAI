@@ -47,8 +47,10 @@ jobs:
           $exe = Join-Path $PWD 'dist/GameTransAI/GameTransAI.exe'
           if (-not (Test-Path $exe)) { throw 'GameTransAI.exe is missing' }
           $fixture = Join-Path $PWD 'tests/fixtures/douluo_settings.jpg.b64'
-          & $exe --ocr-self-test $fixture
-          if ($LASTEXITCODE -ne 0) { throw "Bundled OCR self-test failed: $LASTEXITCODE" }
+          # A PyInstaller --windowed GUI EXE is not synchronously waited on by PowerShell '&'.
+          # Wait explicitly and check the actual EXE process exit code.
+          $testProc = Start-Process -FilePath $exe -ArgumentList @('--ocr-self-test', $fixture) -Wait -PassThru
+          if ($testProc.ExitCode -ne 0) { throw "Bundled OCR self-test failed: $($testProc.ExitCode)" }
           Get-Item $exe | Select-Object Name,Length
       - name: Smoke-test Windows GUI startup (offscreen)
         shell: pwsh

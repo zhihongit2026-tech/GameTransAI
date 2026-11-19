@@ -1,4 +1,4 @@
-"""GameTrans AI V2 launcher and bundled-OCR integration test entrypoint."""
+"""GameTrans Smart AI V3 launcher and bundled-OCR integration test entrypoint."""
 import sys
 
 
@@ -25,5 +25,28 @@ def ocr_self_test(fixture_b64: str) -> int:
 if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--ocr-self-test':
         sys.exit(ocr_self_test(sys.argv[2]))
+    if len(sys.argv)==2 and sys.argv[1]=='--v3-self-test':
+        import os
+        os.environ['QT_QPA_PLATFORM']='offscreen'
+        from PySide6.QtWidgets import QApplication
+        from gametrans.ui import SmartGameWindow, STYLE
+        from gametrans.storage import TranslationCache
+        from gametrans.smart_translation import SmartTranslator
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        with TemporaryDirectory() as temp:
+            translator=SmartTranslator(TranslationCache(Path(temp)/'test.sqlite'),
+                                       local_translate=lambda t: 'Tiếng Việt')
+            if translator.translate('Game','设置',{})[0]!='Cài đặt':
+                sys.exit(4)
+            app=QApplication([])
+            app.setStyleSheet(STYLE)
+            ui=SmartGameWindow()
+            ui.show()
+            app.processEvents()
+            ui._quit_now=True
+            ui.close()
+            app.quit()
+        sys.exit(0)
     from gametrans.ui import launch_app
     sys.exit(launch_app())

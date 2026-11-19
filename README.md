@@ -1,46 +1,51 @@
-# GameTrans AI V2 – tự động dịch chữ Trung trong cửa sổ game Windows
+# GameTrans Smart AI V3 — Chinese → Vietnamese directly on top of Windows games
 
-**Trạng thái: V2 – bản thử nghiệm; không cam kết chính xác 100% hoặc độ trễ cố định.**
+**V3 is a beta, not a game patch.** The program is an external screen-capture and transparent text overlay. It cannot guarantee 100% recognition, perfect text erasure, or compatibility with all fullscreen / anti-cheat games. It does not inject into game processes or modify Lua/bytecode files.
 
-Ứng dụng chạy độc lập, không sửa bộ nhớ hay file game, không bypass anti-cheat. Mở game ở chế độ cửa sổ/borderless, mở GameTransAI và chọn cửa sổ game trong danh sách: ứng dụng tự bắt đầu dịch. Bạn có thể nhấn **BẮT ĐẦU DỊCH TỰ ĐỘNG** nếu muốn khởi động lại bằng nút thủ công. Không phải khoanh bất cứ vùng OCR nào.
+## One-click use
 
-## Cách hoạt động
+1. Extract the full `GameTransAI-V3-Windows-x64` artifact into a folder (keep the `_internal` directory).
+2. Run `GameTransAI.exe` on Windows 10/11 x64; open your game in windowed/borderless mode.
+3. Select the game window (e.g. 斗罗大陆：诛邪传说). Translation begins automatically and the launcher hides into the notification tray. Right-click the tray icon to pause, resume, restore settings or quit.
+4. Chinese text is recognized anywhere in the **game client area**. Vietnamese appears as a click-through overlay over the original text. The background is approximately reconstructed by small-area inpainting. Actual pixels of the game are NOT changed.
+5. When you move or resize the game window, the overlay tracks its client area. The app uses 500-ms scan ticks with a separate translation queue; the actual latency depends on OCR, CPU, and model performance.
 
-1. Chụp *toàn bộ vùng nội dung* cửa sổ game (DXcam hoặc MSS).
-2. RapidOCR tự phát hiện các dòng/cụm chữ Trung cùng tọa độ polygon trong ảnh.
-3. Chỉ dịch các chuỗi có chữ Hán; mỗi chuỗi có một hộp dịch riêng tại vị trí gốc.
-4. Cache SQLite và glossary theo từng game, có tách thuật ngữ xuất hiện trong chuỗi dài.
-5. So sánh khung hình theo các ô nhỏ, giữ các hộp chữ không đổi, chỉ OCR lại vùng biến động; khi cảnh thay đổi lớn thì OCR toàn màn hình.
-6. Lớp phủ Qt trong suốt, không nhận chuột/phím, giới hạn trong khung game; theo dõi vị trí và kích thước client mỗi 100 ms. Cố gắng loại lớp phủ khỏi ảnh chụp bằng `WDA_EXCLUDEFROMCAPTURE` khi được Windows hỗ trợ.
+## Offline translation setup (important)
 
-Tính năng tự động chỉ là **quét mọi vùng có thể nhận diện trong khung game**, không có khả năng đảm bảo đọc hoặc dịch chính xác 100% mọi chữ cách điệu, chữ quá nhỏ hay bị hiệu ứng che. Câu chưa có cache cần Internet để gọi Google Translate qua `deep-translator`; không gửi toàn bộ ảnh lên dịch vụ, nhưng gửi các dòng chữ cần dịch. Một số game chặn chụp màn hình hoặc overlay do anti-cheat, nhất là fullscreen exclusive.
+**A Windows EXE cannot provide arbitrary offline Chinese→Vietnamese translation without the weights of a translation model.** V3 ships the RapidOCR model, an editable built-in set of game UI terms, and compatibility with your persisted SQLite translations / imported Translation Memory. To translate previously unseen sentences *offline*, install [Ollama](https://ollama.com/download/windows), run `ollama pull qwen2.5:3b` once while connected to the Internet, and keep Ollama running locally. The app uses `http://127.0.0.1:11434/api/generate`. Ollama and its multi-GB model are **not bundled** into the GitHub artifact. CPU-only machines may be slow, especially for many short labels. Game-specific TM is strongly recommended.
 
-## Cách chạy mã nguồn
+You can **Nhập Translation Memory** from a UTF-8 `.tsv`, `.txt`, or `.csv` file. Supported line examples:
 
-Windows 10/11 x64, Python 3.12:
+```
+魂师\tHồn Sư
+魂环 = Hồn Hoàn
+获得奖励 => Nhận phần thưởng
+```
 
-```powershell
+Here `\t` indicates a tab; actual TSV files must use a real tab. Exact matching uses normalized whitespace. TM imports into the currently selected profile or the global `*` profile when no game is selected. It is persisted in `%LOCALAPPDATA%/GameTransAI/translations.sqlite3`. V3 checks profile TM, global TM, prior V3 translations, some legacy V2 Google translations, built-in UI terms, offline Ollama, then **optionally** the online provider.
+
+**Online fallback is OFF by default.** Only enable it if you consent to sending recognized game text to the third-party translation provider. Online requests are gated to approximately one every 2.2 s, automatically pause after 429/`Too many requests`, and retry later rather than issuing an uncontrolled burst. **No script bypasses rate limits.**
+
+## Features and limitations
+
+- RapidOCR detects Chinese labels and returns individual bounding boxes (no manual ROI drawing).
+- Background translation futures prevent OCR from waiting for Google or a local LLM; a maximum of 48 phrases may be pending.
+- OCR uses full-screen initial detection and incremental changed tiles; on large scene changes it scans the full client. Bright/decorative moving backgrounds can still make scanning costly.
+- Text is visually replaced by sampling / inpainting the captured background under the original OCR line, then drawing Vietnamese at the corresponding coordinates. The approximation may look imperfect on textured/moving interfaces.
+- The overlay is clipped to the game client area, usually hides when game isn't foreground, tracks movement/resize, and does not intercept mouse input. Windows display capture exclusion is attempted, not guaranteed on every GPU/game.
+- If no Ollama model, TM hit or built-in term exists, new text remains Chinese; the program explains that offline translation is unavailable instead of claiming 100% translation.
+- To inspect issues, restore the launcher from the tray icon. GameTrans does not screen-record in the background.
+
+## Build and test
+
+Python 3.12 on Windows:
+
+```
 py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\activate
 pip install -r requirements.txt
+python -m unittest discover -s tests -v
 python main.py
 ```
 
-## Tạo bản EXE Windows
-
-GitHub → Actions → **Build Windows EXE V2** → Run workflow. Build bắt buộc qua:
-
-- Unit tests, gồm bài test ảnh gốc của game **斗罗大陆：诛邪传说** (fixture lưu dưới dạng JPEG base64 để GitHub API nhận được).
-- RapidOCR thật đọc các dòng tiếng Trung trong ảnh mẫu.
-- PyInstaller `onedir`, kiểm tra EXE tồn tại, chạy `GameTransAI.exe --ocr-self-test tests/fixtures/douluo_settings.jpg.b64` và smoke test khởi động giao diện Qt `offscreen`.
-- Nếu tất cả đạt, upload artifact `GameTransAI-V2-Windows-x64` (ZIP chứa `GameTransAI.exe` và thư mục `_internal`).
-
-Chỉ xác nhận bản build sau khi job thành công và có artifact tải được.
-
-## Giới hạn và trách nhiệm sử dụng
-
-- Vùng bị che, chữ chuyển động hoặc font nghệ thuật có thể OCR sai; giao diện chuyển nhanh có thể dẫn đến trễ dịch.
-- Dịch dựa vào mạng cho các câu mới; gọi dịch vụ ngoài có thể chậm hoặc bị giới hạn. Không cam kết dịch tức thì toàn màn hình.
-- Hiệu năng phụ thuộc CPU, đồ họa game, độ phân giải và số lượng nhãn; pipeline chạy riêng khỏi luồng GUI.
-- Overlay phụ thuộc hỗ trợ Windows và cách game render, đặc biệt anti-cheat/fullscreen-exclusive; không tìm cách can thiệp hoặc vượt qua bảo vệ game.
-- Kiểm thử tự động xác nhận cấu trúc, OCR và EXE khởi chạy trong Windows CI, **không thay thế kiểm thử game thật trực tiếp tại máy của bạn**.
+GitHub Actions `Build Windows EXE V3` executes unit tests, **real RapidOCR on the submitted 斗罗大陆 settings screenshot**, PyInstaller `onedir`, bundled EXE OCR self-test, and an offscreen Qt startup smoke test, then publishes `GameTransAI-V3-Windows-x64` if all succeed. A passing CI build **does not** prove in-game rendering is compatible with your GPU/game: test it in the actual Windows game and send screenshots or logs for defects.

@@ -1,70 +1,40 @@
-"""V2 desktop UI: select a game, press Start; no OCR region drawing required."""
+"""GameTrans Smart AI V3 compact launcher; live work happens on top of game."""
 from __future__ import annotations
 
 import copy
 import sys
 import traceback
+from pathlib import Path
 
-import numpy as np
 from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRunnable, QThreadPool
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFrame, QGroupBox, QHBoxLayout,
-    QLabel, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
+    QMainWindow, QMenu, QMessageBox, QPushButton, QSystemTrayIcon,
     QVBoxLayout, QWidget,
 )
 
-from .capture import capture_game
 from .models import GameProfile
-from .overlay import TranslationOverlay
-from .scanner import ScanEngine
+from .smart_overlay import SmartOverlay
+from .smart_scanner import SmartScanEngine
+from .smart_translation import SmartTranslator, import_tm
 from .storage import ProfileStore, TranslationCache
-from .translator import Translator
-from .windows import game_client_rect, is_game_foreground, list_game_windows
+from .windows import (enable_dpi_awareness, game_client_rect, is_game_foreground,
+                      list_game_windows)
 
 STYLE = """
-QWidget { background: #111d2e; color: #e7eff9; font: 10pt 'Segoe UI'; }
-QMainWindow { background: #091322; }
-QGroupBox { border: 1px solid #334b62; border-radius: 10px; margin-top: 15px;
-            padding: 13px 9px 9px 9px; font-weight: bold; }
-QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
-QComboBox, QPlainTextEdit { border: 1px solid #375773; border-radius: 8px;
-  padding: 9px; background: #1a2c43; selection-background-color: #147c9d; }
-QPushButton { background: #087497; border: 1px solid #37c9e7; border-radius: 8px;
-  padding: 10px; font-weight: bold; }
-QPushButton:hover { background: #148fad; }
-QPushButton:disabled { background: #293b4b; color: #7f91a2; border: 1px solid #293b4b; }
-QPushButton#start { background: #00a1ad; color: white; font-size: 12pt; padding: 15px; }
-QLabel#heading { font-size: 22pt; font-weight: bold; color: #62e6f3; }
-QLabel#status { color: #a4ecca; }
-QLabel#hint { color: #a6bed2; }
-QLabel#preview { border: 1px solid #2f5169; border-radius: 8px; background: #050d19; }
+QMainWindow, QWidget { background: #101d30; color: #f0f5fb; font: 10pt 'Segoe UI'; }
+QLabel#title { color: #59eff0; font: bold 17pt 'Segoe UI'; }
+QLabel#muted { color: #a6bfd4; }
+QLabel#status { color: #a6f0be; }
+QComboBox { background: #1a2c43; color: white; border: 1px solid #4b6d89;
+  border-radius: 8px; padding: 10px; }
+QPushButton { background: #126e8b; border: 1px solid #4ca7cc; border-radius: 8px;
+  padding: 10px; font-weight: 600; }
+QPushButton:hover { background: #148db1; }
+QPushButton#start { background: #009b9e; font-size: 12pt; padding: 14px; }
+QCheckBox { spacing: 8px; }
 """
-
-
-class GamePreview(QLabel):
-    def __init__(self):
-        super().__init__("Chọn cửa sổ game để xem trước")
-        self.setObjectName("preview")
-        self.setMinimumSize(500, 290)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._source = None
-
-    def set_frame(self, frame):
-        frame = np.ascontiguousarray(frame[:, :, :3])
-        h, w = frame.shape[:2]
-        image = QImage(frame.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
-        self._source = QPixmap.fromImage(image)
-        self._redraw()
-
-    def _redraw(self):
-        if self._source is not None:
-            self.setPixmap(self._source.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                                Qt.TransformationMode.SmoothTransformation))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._redraw()
 
 
 class ScanSignals(QObject):
@@ -81,304 +51,340 @@ class ScanTask(QRunnable):
 
     def run(self):
         try:
-            self.signals.finished.emit(self.engine.scan(self.hwnd, self.profile), self.epoch)
+            self.signals.finished.emit(self.engine.scan(self.hwnd,self.profile),self.epoch)
         except Exception:
-            self.signals.failed.emit(traceback.format_exc(limit=5), self.epoch)
+            self.signals.failed.emit(traceback.format_exc(limit=4),self.epoch)
 
 
-class GameTransWindow(QMainWindow):
+def tray_icon():
+    pix = QPixmap(48,48)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#039eac"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(2,2,44,44,10,10)
+    p.setPen(QColor("white"))
+    f = p.font()
+    f.setBold(True)
+    f.setPixelSize(24)
+    p.setFont(f)
+    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "译")
+    p.end()
+    return QIcon(pix)
+
+
+class SmartGameWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GameTrans AI V2 - Dịch game Trung sang Việt")
-        self.resize(1130, 760)
-        self.profiles_store = ProfileStore()
-        self.profiles = self.profiles_store.load()
-        self.profile = GameProfile("Game mới", "")
-        self.cache = TranslationCache()
-        self.engine = ScanEngine(Translator(self.cache))
-        self.overlay = TranslationOverlay()
-        self.windows = []
-        self.hwnd = None
-        self.running = False
-        self.busy = False
-        self.task = None
-        self.epoch = 0
-        self.pool = QThreadPool(self)
+        self.setWindowTitle("GameTrans Smart AI V3 - Việt hóa trực tiếp trong game")
+        self.resize(610,395)
+        self.setMinimumWidth(520)
+        self.cache=TranslationCache()
+        self.profiles_store=ProfileStore()
+        self.profiles=self.profiles_store.load()
+        self.profile=GameProfile("Game", "")
+        self.translator=SmartTranslator(self.cache)
+        self.engine=SmartScanEngine(self.translator)
+        self.overlay=SmartOverlay()
+        self.windows=[]
+        self.hwnd=None
+        self.running=False
+        self.busy=False
+        self.task=None
+        self.epoch=0
+        self.last_size=None
+        self.pool=QThreadPool(self)
         self.pool.setMaxThreadCount(1)
-        self._last_geometry = None
+        self._quit_now=False
         self._build_ui()
+        self._configure_tray()
         self.refresh_windows()
-        self.scan_timer = QTimer(self)
+        self.scan_timer=QTimer(self)
         self.scan_timer.timeout.connect(self.scan_once)
-        self.anchor_timer = QTimer(self)
+        self.anchor_timer=QTimer(self)
         self.anchor_timer.timeout.connect(self.update_overlay_anchor)
         self.anchor_timer.start(100)
 
     def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(18, 16, 18, 16)
-        title = QLabel("GameTrans AI V2")
-        title.setObjectName("heading")
+        outer=QVBoxLayout()
+        outer.setContentsMargins(22,20,22,16)
+        outer.setSpacing(10)
+        title=QLabel("🎮 GameTrans Smart AI V3")
+        title.setObjectName("title")
         outer.addWidget(title)
-        tip = QLabel("Việt hóa chữ Trung trên toàn bộ cửa sổ game — không cần khoanh vùng OCR")
-        tip.setObjectName("hint")
-        outer.addWidget(tip)
-
-        cols = QHBoxLayout()
-        outer.addLayout(cols, 1)
-        left = QFrame()
-        lv = QVBoxLayout(left)
-        source = QGroupBox("1. Chọn game đang chạy")
-        sv = QVBoxLayout(source)
-        self.window_select = QComboBox()
-        self.window_select.currentIndexChanged.connect(self.on_window_selected)
-        self.window_select.activated.connect(self._start_from_dropdown)
-        sv.addWidget(self.window_select)
-        refresh = QPushButton("Làm mới danh sách game")
+        note=QLabel("Chọn game → dịch ngay trên game → ứng dụng chạy ẩn ở khay hệ thống")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        outer.addWidget(note)
+        outer.addWidget(QLabel("Cửa sổ game đang mở"))
+        row=QHBoxLayout()
+        self.game_select=QComboBox()
+        self.game_select.activated.connect(self._game_activated)
+        row.addWidget(self.game_select,1)
+        refresh=QPushButton("↻ Làm mới")
         refresh.clicked.connect(self.refresh_windows)
-        sv.addWidget(refresh)
-        lv.addWidget(source)
-
-        visual = QGroupBox("2. Xem trước màn hình game")
-        vv = QVBoxLayout(visual)
-        self.preview = GamePreview()
-        vv.addWidget(self.preview, 1)
-        snap = QPushButton("Chụp thử màn hình game")
-        snap.clicked.connect(self.capture_preview)
-        vv.addWidget(snap)
-        lv.addWidget(visual, 1)
-
-        results = QGroupBox("Nhận diện và bản dịch gần nhất")
-        rs = QVBoxLayout(results)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumHeight(152)
-        self.log.setPlaceholderText("Các cụm tiếng Trung được tự động phát hiện sẽ hiển thị tại đây.")
-        rs.addWidget(self.log)
-        lv.addWidget(results)
-        cols.addWidget(left, 1)
-
-        right = QFrame()
-        right.setFixedWidth(320)
-        rv = QVBoxLayout(right)
-        opts = QGroupBox("Cấu hình tự động")
-        ov = QVBoxLayout(opts)
-        for label in ["OCR toàn màn hình game", "Dịch từng cụm chữ đúng tọa độ", "Tự co giãn khi thay đổi độ phân giải", "Ưu tiên bộ nhớ dịch SQLite"]:
-            v = QLabel("✓  " + label)
-            v.setStyleSheet("color:#b9f2e7")
-            ov.addWidget(v)
-        self.focus_only = QCheckBox("Chỉ hiện khi game đang được chọn")
-        self.focus_only.setChecked(True)
-        self.focus_only.toggled.connect(self.update_overlay_anchor)
-        ov.addWidget(self.focus_only)
-        self.overlay_enabled = QCheckBox("Hiển thị tiếng Việt đè trong game")
-        self.overlay_enabled.setChecked(True)
-        self.overlay_enabled.toggled.connect(self.update_overlay_anchor)
-        ov.addWidget(self.overlay_enabled)
-        rv.addWidget(opts)
-        termgroup = QGroupBox("Từ điển tên riêng (tùy chọn)")
-        tv = QVBoxLayout(termgroup)
-        tv.addWidget(QLabel("Mỗi dòng: 词语 = Bản dịch tiếng Việt"))
-        self.glossary_edit = QPlainTextEdit()
-        self.glossary_edit.setPlaceholderText("魂师 = Hồn Sư\n魂环 = Hồn Hoàn")
-        self.glossary_edit.setMaximumHeight(115)
-        tv.addWidget(self.glossary_edit)
-        save = QPushButton("Lưu thuật ngữ")
-        save.clicked.connect(self.save_profile)
-        tv.addWidget(save)
-        rv.addWidget(termgroup)
-
-        self.start_btn = QPushButton("▶ BẮT ĐẦU DỊCH TỰ ĐỘNG")
-        self.start_btn.setObjectName("start")
-        self.start_btn.clicked.connect(self.start)
-        rv.addWidget(self.start_btn)
-        self.stop_btn = QPushButton("■ DỪNG DỊCH")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.stop)
-        rv.addWidget(self.stop_btn)
-        self.counter = QLabel("Đã lưu: 0 câu dịch")
-        rv.addWidget(self.counter)
-        self.info = QLabel("Lưu ý: câu chưa có trong bộ nhớ cần Internet.\nGame có chống quay màn hình có thể không tương thích.")
-        self.info.setWordWrap(True)
-        self.info.setObjectName("hint")
-        rv.addWidget(self.info)
-        rv.addStretch(1)
-        cols.addWidget(right)
-        self.status_label = QLabel("Sẵn sàng — chọn game rồi bấm BẮT ĐẦU DỊCH TỰ ĐỘNG")
+        row.addWidget(refresh)
+        outer.addLayout(row)
+        self.status_label=QLabel("Sẵn sàng. Chọn game để bắt đầu dịch.")
         self.status_label.setObjectName("status")
         self.status_label.setWordWrap(True)
         outer.addWidget(self.status_label)
+        self.offline_info=QLabel("Ưu tiên: Từ điển + Translation Memory + mô hình Ollama trên máy")
+        self.offline_info.setObjectName("muted")
+        self.offline_info.setWordWrap(True)
+        outer.addWidget(self.offline_info)
+        self.online_check=QCheckBox("Cho phép dịch online khi thiếu mô hình/bản dịch offline")
+        self.online_check.setChecked(False)
+        self.online_check.toggled.connect(self._provider_changed)
+        outer.addWidget(self.online_check)
+        self.focus_only=QCheckBox("Chỉ hiện tiếng Việt khi đang chơi game")
+        self.focus_only.setChecked(True)
+        self.focus_only.toggled.connect(self.update_overlay_anchor)
+        outer.addWidget(self.focus_only)
+        actions=QHBoxLayout()
+        self.tm_button=QPushButton("Nhập Translation Memory")
+        self.tm_button.clicked.connect(self.import_memory)
+        actions.addWidget(self.tm_button)
+        self.model_help=QPushButton("Thiết lập dịch offline")
+        self.model_help.clicked.connect(self.show_model_help)
+        actions.addWidget(self.model_help)
+        outer.addLayout(actions)
+        self.start_button=QPushButton("▶ CHỌN GAME VÀ DỊCH")
+        self.start_button.setObjectName("start")
+        self.start_button.clicked.connect(self.start)
+        outer.addWidget(self.start_button)
+        self.stop_button=QPushButton("■ Dừng dịch")
+        self.stop_button.clicked.connect(self.stop)
+        self.stop_button.setEnabled(False)
+        outer.addWidget(self.stop_button)
+        root=QWidget()
+        root.setLayout(outer)
+        self.setCentralWidget(root)
 
-    def status(self, msg):
-        self.status_label.setText(msg)
+    def _configure_tray(self):
+        self.tray=QSystemTrayIcon(tray_icon(),self)
+        menu=QMenu()
+        menu.addAction("Mở GameTrans Smart AI",self.restore_window)
+        self.pause_action=menu.addAction("Tạm dừng dịch",self.toggle_pause)
+        menu.addSeparator()
+        menu.addAction("Thoát hẳn",self.quit_app)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._tray_activated)
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray.show()
+        self.setWindowIcon(self.tray.icon())
+
+    def _tray_activated(self, reason):
+        if reason==QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.restore_window()
+
+    def restore_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def hide_to_tray(self):
+        if self.running and self.tray.isVisible():
+            self.hide()
+        elif self.running:
+            self.showMinimized()
+
+    def status(self, message):
+        self.status_label.setText(message)
+        self.tray.setToolTip("GameTrans Smart AI V3\n"+message[:110])
 
     def refresh_windows(self):
-        selected = self.hwnd
-        name = self.profile.window_title
-        self.windows = list_game_windows()
-        self.window_select.blockSignals(True)
-        self.window_select.clear()
+        old=self.hwnd
+        self.windows=list_game_windows()
+        self.game_select.blockSignals(True)
+        self.game_select.clear()
+        self.game_select.addItem("-- Chọn game đang chạy --",None)
         for win in self.windows:
-            self.window_select.addItem(win.title[:85], win.hwnd)
-        ix = next((i for i, win in enumerate(self.windows) if win.hwnd == selected), -1)
-        if ix < 0:
-            ix = next((i for i, win in enumerate(self.windows) if win.title == name), -1)
-        if ix >= 0:
-            self.window_select.setCurrentIndex(ix)
-        self.window_select.blockSignals(False)
-        self.on_window_selected(self.window_select.currentIndex())
+            self.game_select.addItem(win.title[:75],win.hwnd)
+        index=next((i for i in range(1,self.game_select.count())
+                    if self.game_select.itemData(i)==old),0)
+        self.game_select.setCurrentIndex(index)
+        self.game_select.blockSignals(False)
+        self.start_button.setEnabled(bool(self.game_select.currentData()))
 
-    def on_window_selected(self, index):
-        hwnd = self.window_select.itemData(index) if index >= 0 else None
-        if hwnd is None:
-            self.hwnd = None
-            self.start_btn.setEnabled(False)
+    def _game_activated(self,index):
+        hwnd=self.game_select.itemData(index)
+        if not hwnd:
             return
-        if self.running and hwnd != self.hwnd:
+        if self.running:
             self.stop()
-        self.hwnd = int(hwnd)
-        name = next((win.title for win in self.windows if win.hwnd == hwnd), "Game")
-        self.profile = self.profiles.get(name, GameProfile(name, name))
-        self.glossary_edit.setPlainText("\n".join(f"{k} = {v}" for k, v in self.profile.glossary.items()))
-        self.counter.setText(f"Đã lưu: {self.cache.count(self.profile.name):,} câu dịch")
-        self.start_btn.setEnabled(not self.running)
+        self.hwnd=int(hwnd)
+        name=next((w.title for w in self.windows if w.hwnd==hwnd),"Game")
+        self.profile=self.profiles.get(name,GameProfile(name,name))
+        self.online_check.blockSignals(True)
+        self.online_check.setChecked(self.profile.provider=="offline+online")
+        self.online_check.blockSignals(False)
+        self.translator.set_online_enabled(self.online_check.isChecked())
+        self.start()
 
-    def _start_from_dropdown(self, index):
-        # An explicit selection is the one-click 'select game and translate' flow.
-        # This also fires when the user selects the already highlighted window.
-        if self.hwnd and not self.running:
-            self.start()
+    def _provider_changed(self,enabled):
+        self.translator.set_online_enabled(enabled)
+        self.profile.provider="offline+online" if enabled else "offline"
+        if self.hwnd:
+            self.profiles[self.profile.name]=self.profile
+            self.profiles_store.save(self.profiles)
+            self.engine.reset() if not self.busy else None
 
-    def save_profile(self):
-        if not self.hwnd:
-            return
-        terms = {}
-        for line in self.glossary_edit.toPlainText().splitlines():
-            if "=" in line:
-                source, target = line.split("=", 1)
-                if source.strip() and target.strip():
-                    terms[source.strip()] = target.strip()
-        self.profile.glossary = terms
-        self.profiles[self.profile.name] = self.profile
-        self.profiles_store.save(self.profiles)
-        self.status("Đã lưu thuật ngữ cho game này.")
+    def show_model_help(self):
+        QMessageBox.information(self,"Dịch offline", "Để dịch mọi câu mới ngay trên máy:\n\n"
+            "1. Cài Ollama cho Windows từ https://ollama.com\n"
+            "2. Mở Terminal và chạy: ollama pull qwen2.5:3b\n"
+            "3. Đảm bảo Ollama chạy, sau đó chọn game.\n\n"
+            "Không có Ollama vẫn dịch được các cụm đã lưu trong Translation Memory "
+            "và từ điển giao diện. Không tự động gửi chữ ra Internet nếu chưa bật tùy chọn online.")
 
-    def capture_preview(self):
-        if not self.hwnd:
-            self.status("Chưa chọn cửa sổ game.")
+    def import_memory(self):
+        filename,_=QFileDialog.getOpenFileName(self,"Nhập Translation Memory", "",
+                                                  "Translation Memory (*.txt *.tsv *.csv)")
+        if not filename:
             return
         try:
-            frame, rect = capture_game(self.hwnd)
-            self.preview.set_frame(frame)
-            self.status(f"Đã chụp vùng game: {rect[2]} × {rect[3]} px.")
+            count=import_tm(filename,self.cache,self.profile.name if self.hwnd else "*")
+            if not self.busy:
+                self.engine.reset()
+            self.status(f"Đã thêm {count} cặp câu dịch vào bộ nhớ. Lần quét tiếp sẽ dùng chúng.")
         except Exception as exc:
-            self.status(f"Không chụp được game: {exc}")
+            QMessageBox.warning(self,"Không nhập được Translation Memory",str(exc))
 
     def start(self):
+        if not self.hwnd:
+            hwnd=self.game_select.currentData()
+            if hwnd is not None:
+                self.hwnd=int(hwnd)
+                name=next((w.title for w in self.windows if w.hwnd==hwnd),"Game")
+                self.profile=self.profiles.get(name,GameProfile(name,name))
         if not self.hwnd or game_client_rect(self.hwnd) is None:
-            QMessageBox.warning(self, "Chưa chọn game", "Hãy mở game ở chế độ cửa sổ hoặc không viền rồi chọn lại.")
+            self.status("Game đã đóng, thu nhỏ hoặc chưa chọn. Hãy mở game rồi chọn lại.")
             return
-        self.save_profile()
-        self.epoch += 1
+        self.profiles[self.profile.name]=self.profile
+        self.profiles_store.save(self.profiles)
+        self.translator.set_online_enabled(self.online_check.isChecked())
+        self.epoch+=1
         if not self.busy:
             self.engine.reset()
-        self.running = True
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.scan_timer.start(450)
+        self.running=True
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.pause_action.setText("Tạm dừng dịch")
+        self.scan_timer.start(500)
         self.scan_once()
-        self.status("Đang tự động dịch chữ trên toàn bộ màn hình game. Quay lại game để xem bản dịch.")
+        self.status("Đang nhận chữ và Việt hóa trực tiếp trong game. Đổi sang cửa sổ game để xem.")
+        QTimer.singleShot(200,self.hide_to_tray)
 
     def stop(self):
-        self.epoch += 1
-        self.running = False
+        self.epoch+=1
+        self.running=False
         self.scan_timer.stop()
-        self.start_btn.setEnabled(bool(self.hwnd))
-        self.stop_btn.setEnabled(False)
         self.overlay.hide()
         self.overlay.set_results([])
-        self.status("Đã dừng dịch.")
+        self.start_button.setEnabled(bool(self.hwnd))
+        self.stop_button.setEnabled(False)
+        self.pause_action.setText("Tiếp tục dịch")
+        self.status("Đã tạm dừng. Nhấn Tiếp tục dịch ở biểu tượng khay hệ thống.")
+
+    def toggle_pause(self):
+        if self.running:
+            self.stop()
+        else:
+            self.start()
 
     def scan_once(self):
-        if self.busy or not self.running or self.hwnd is None:
+        if not self.running or self.busy or not self.hwnd:
             return
         if game_client_rect(self.hwnd) is None:
-            self.status("Game đã thu nhỏ hoặc đóng. Hãy mở lại game.")
+            self.overlay.hide()
             return
-        self.busy = True
-        self.task = ScanTask(self.engine, self.hwnd, self.profile, self.epoch)
+        self.busy=True
+        self.task=ScanTask(self.engine,self.hwnd,self.profile,self.epoch)
         self.task.signals.finished.connect(self.scan_done)
         self.task.signals.failed.connect(self.scan_failed)
         self.pool.start(self.task)
 
-    def scan_done(self, result, epoch):
-        self.busy = False
-        self.task = None
-        if epoch != self.epoch or result["hwnd"] != self.hwnd or not self.running:
+    def scan_done(self,result,epoch):
+        self.busy=False
+        self.task=None
+        if not self.running or epoch!=self.epoch or result["hwnd"]!=self.hwnd:
             return
-        current = game_client_rect(self.hwnd)
-        if current is None:
+        rect=game_client_rect(self.hwnd)
+        if rect is None:
             self.overlay.hide()
             return
-        if current[2:] != result["geometry"][2:]:
-            self.overlay.set_results([])  # Never draw stale text on a resized game.
+        if rect[2:]!=result["geometry"][2:]:
+            self.overlay.set_results([])
             self.scan_once()
             return
-        self.preview.set_frame(result["image"])
-        self.overlay.set_results(result["blocks"], (result["geometry"][2], result["geometry"][3]))
-        self.log.setPlainText("\n\n".join(
-            f"{b.source}  →  {b.target}  ({b.origin})" for b in result["blocks"]
-        ) or "Chưa tìm thấy chữ Trung.")
-        self.counter.setText(f"Đã lưu: {self.cache.count(self.profile.name):,} câu dịch")
+        self.overlay.set_results(result["blocks"],rect[2:],result["image"])
         if result["errors"]:
-            self.status(f"{len(result['blocks'])} cụm dịch, lỗi: {result['errors'][0][:110]}")
+            self.status(result["errors"][0])
+        elif result["warning"] and not result["blocks"]:
+            self.status(result["warning"] + " — dùng TM hoặc bật mô hình offline.")
         else:
-            self.status(f"Đang dịch: {len(result['blocks'])} cụm chữ | lần quét {result['elapsed_ms']} ms | {current[2]}×{current[3]}")
+            self.status(f"Đã phát hiện {result['detected']} cụm Trung, "
+                        f"đang hiển thị {len(result['blocks'])} bản dịch; "
+                        f"đang xử lý {result['pending']} cụm.")
         self.update_overlay_anchor()
 
-    def scan_failed(self, message, epoch):
-        self.busy = False
-        self.task = None
-        if epoch != self.epoch:
+    def scan_failed(self,message,epoch):
+        self.busy=False
+        self.task=None
+        if epoch!=self.epoch:
             return
-        self.overlay.set_results([])
-        self.status("Lỗi quét: " + message.splitlines()[-1][:180])
+        self.overlay.hide()
+        self.status("Lỗi chụp/OCR: " + message.splitlines()[-1][:145])
 
     def update_overlay_anchor(self):
-        if not self.running or not self.hwnd or not self.overlay_enabled.isChecked():
+        if not self.running or not self.hwnd:
             self.overlay.hide()
             return
-        rect = game_client_rect(self.hwnd)
+        rect=game_client_rect(self.hwnd)
         if rect is None or (self.focus_only.isChecked() and not is_game_foreground(self.hwnd)):
             self.overlay.hide()
             return
-        x, y, w, h = rect
-        if self.overlay.geometry().getRect() != (x, y, w, h):
-            self.overlay.setGeometry(x, y, w, h)
-            if self._last_geometry is not None and self._last_geometry[2:] != (w, h):
+        if self.overlay.geometry().getRect()!=rect:
+            self.overlay.setGeometry(*rect)
+            if self.last_size and rect[2:]!=self.last_size:
                 self.overlay.set_results([])
-            self._last_geometry = rect
+            self.last_size=rect[2:]
         if not self.overlay.isVisible():
             self.overlay.show()
         self.overlay.update()
 
-    def closeEvent(self, event):
-        self.stop()
+    def closeEvent(self,event):
+        if not self._quit_now and self.tray.isVisible():
+            self.hide()
+            event.ignore()
+            return
+        self._cleanup()
+        event.accept()
+
+    def _cleanup(self):
+        self.running=False
+        self.scan_timer.stop()
+        self.overlay.hide()
         self.overlay.close()
         self.engine.close()
-        event.accept()
+        self.tray.hide()
+
+    def quit_app(self):
+        self._quit_now=True
+        self.close()
+        QApplication.instance().quit()
 
 
 def launch_app():
-    from .windows import enable_dpi_awareness
-    if sys.platform != "win32":
-        raise RuntimeError("GameTrans AI V2 requires Windows 10/11")
+    if sys.platform!="win32":
+        raise RuntimeError("GameTrans Smart AI V3 requires Windows 10/11")
     enable_dpi_awareness()
-    app = QApplication(sys.argv)
+    app=QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
-    ui = GameTransWindow()
-    ui.show()
+    window=SmartGameWindow()
+    window.show()
     return app.exec()

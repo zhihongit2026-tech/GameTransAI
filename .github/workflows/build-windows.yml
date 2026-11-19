@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build Windows EXE V2
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ on:
       - '**.py'
       - 'requirements*.txt'
       - 'build_windows.bat'
+      - 'tests/fixtures/**'
       - '.github/workflows/build-windows.yml'
 
 permissions:
@@ -18,7 +19,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,27 +27,43 @@ jobs:
           python-version: '3.12'
           architecture: x64
           cache: pip
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-build.txt
-      - name: Run unit tests
+      - name: Unit tests + REAL screenshot OCR test
+        env:
+          GAMETRANS_OCR_INTEGRATION: '1'
         run: python -m unittest discover -s tests -v
-      - name: Package desktop application
+      - name: Package V2 with bundled OCR models
         run: >-
           python -m PyInstaller --clean --noconfirm --onedir --windowed
           --name GameTransAI --collect-all rapidocr
           --collect-all onnxruntime --collect-all dxcam
           --collect-data cv2 main.py
-      - name: Check Windows executable exists
+      - name: Verify EXE exists and execute bundled real-game OCR self-test
         shell: pwsh
         run: |
-          if (-not (Test-Path 'dist/GameTransAI/GameTransAI.exe')) { throw 'Missing GameTransAI.exe' }
-          Get-Item 'dist/GameTransAI/GameTransAI.exe' | Select-Object Name,Length
-      - name: Publish executable bundle as ZIP artifact
+          $exe = Join-Path $PWD 'dist/GameTransAI/GameTransAI.exe'
+          if (-not (Test-Path $exe)) { throw 'GameTransAI.exe is missing' }
+          $fixture = Join-Path $PWD 'tests/fixtures/douluo_settings.jpg.b64'
+          & $exe --ocr-self-test $fixture
+          if ($LASTEXITCODE -ne 0) { throw "Bundled OCR self-test failed: $LASTEXITCODE" }
+          Get-Item $exe | Select-Object Name,Length
+      - name: Smoke-test Windows GUI startup (offscreen)
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $exe = Join-Path $PWD 'dist/GameTransAI/GameTransAI.exe'
+          $p = Start-Process -FilePath $exe -PassThru -WorkingDirectory (Join-Path $PWD 'dist/GameTransAI')
+          Start-Sleep -Seconds 5
+          $p.Refresh()
+          if ($p.HasExited) { throw "EXE exited prematurely: $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+      - name: Upload Windows executable bundle
         uses: actions/upload-artifact@v4
         with:
-          name: GameTransAI-Windows-x64
+          name: GameTransAI-V2-Windows-x64
           path: dist/GameTransAI/
           if-no-files-found: error
           retention-days: 30

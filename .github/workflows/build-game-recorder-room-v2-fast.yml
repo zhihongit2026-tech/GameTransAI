@@ -1,0 +1,109 @@
+name: Game Recorder 4-minute Room Fix v2 - portable package
+
+on:
+  push:
+    branches: [build/game-recorder-0.3.8-4min]
+    paths:
+      - .github/workflows/build-game-recorder-room-v2-fast.yml
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download last room-connected Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: Game-Recorder-0.3.8-4min-ROOM-FIXED-Windows-x64
+          run-id: 45182859729
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: previous
+
+      - name: Get pinned source and apply both fixes
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch capture-v0.3.8 https://github.com/trquoccuong/Game-Recorder.git upstream
+          $commit = (git -C upstream rev-parse HEAD).Trim()
+          if ($commit -ne '657f49a17afba1e36b05921b15127f28b389fc2f') { throw 'Unexpected original source commit' }
+          $patches = @(
+            @{ Source = 'build-game-recorder/recording-timer-4min.patch.gz.b64'; Hash = '9d4dea8e62bbe887b91b1354971322774a08904e33b8f17fc32941a1170a367e' },
+            @{ Source = 'roomfix/host-autostop-room-4min.patch.gz.b64'; Hash = 'f7128cd51f7ae6255efdb1b9f7e7410040bef7159cdf365edcc5e37f52f80ae0' }
+          )
+          foreach ($p in $patches) {
+            $compressed = [Convert]::FromBase64String((Get-Content $p.Source -Raw).Trim())
+            $stream = [IO.MemoryStream]::new($compressed)
+            $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionMode]::Decompress)
+            $buffer = [IO.MemoryStream]::new()
+            try { $gzip.CopyTo($buffer) } finally { $gzip.Dispose(); $stream.Dispose() }
+            [IO.File]::WriteAllBytes('temp.patch', $buffer.ToArray())
+            if ((Get-FileHash temp.patch -Algorithm SHA256).Hash.ToLowerInvariant() -ne $p.Hash) {
+              throw "Patch checksum mismatch for $($p.Source)"
+            }
+            git -C upstream apply --check ../temp.patch
+            if ($LASTEXITCODE -ne 0) { throw "Cannot apply $($p.Source)" }
+            git -C upstream apply ../temp.patch
+            if ($LASTEXITCODE -ne 0) { throw "Apply failed $($p.Source)" }
+          }
+          git -C upstream diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid whitespace in patch' }
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: upstream/capture/dotnet/global.json
+
+      - name: Build and publish corrected Windows app executable
+        shell: pwsh
+        working-directory: upstream/capture/dotnet
+        run: |
+          dotnet publish src/Apps/Odx.App -c Release -r win-x64 --self-contained -p:PublishReadyToRun=true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:Version=0.3.8-4min-room-v2 -o ../../../new-app
+          if ($LASTEXITCODE -ne 0) { throw 'Windows app publish failed' }
+
+      - name: Replace app only, retain known-good room config and recorder binaries
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+          $source = 'previous/odx-capture-0.3.8-4min-ROOM-FIXED-win-x64.zip'
+          if (-not (Test-Path $source)) { throw 'Expected room-fixed base package not found' }
+          [IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path $source).Path, (Join-Path $PWD 'fixed'))
+          $bin = 'fixed/odx-capture-0.3.8-4min-win-x64/bin'
+          if (-not (Test-Path "$bin/odx-capture.json")) { throw 'Original room connection config missing' }
+          $config = Get-Content "$bin/odx-capture.json" -Raw | ConvertFrom-Json
+          if (-not $config.orchestrator -or $config.orchestrator -match 'example\.com') {
+            throw 'Wrong original room config'
+          }
+          if (-not (Test-Path "$bin/odx.exe") -or -not (Test-Path "$bin/ffmpeg/ffmpeg.exe")) {
+            throw 'Base package is missing record tools'
+          }
+          $newApp = 'new-app/odx-app.exe'
+          if (-not (Test-Path $newApp)) { throw 'Corrected WPF app executable missing' }
+          $hashBefore = (Get-FileHash "$bin/odx-app.exe" -Algorithm SHA256).Hash
+          Copy-Item $newApp "$bin/odx-app.exe" -Force
+          $hashAfter = (Get-FileHash "$bin/odx-app.exe" -Algorithm SHA256).Hash
+          if ($hashAfter -eq $hashBefore) { throw 'Executable was not replaced' }
+          if (-not (Test-Path 'fixed/odx-capture-0.3.8-4min-win-x64/Odx Capture.exe')) {
+            throw 'Original launcher missing'
+          }
+
+          New-Item -ItemType Directory -Force output | Out-Null
+          $archivePath = Join-Path $PWD 'output/Game-Recorder-0.3.8-4min-ROOM-AUTOSTOP-v2.zip'
+          [IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $PWD 'fixed'), $archivePath,
+              [IO.Compression.CompressionLevel]::Optimal, $false)
+          $check = [IO.Compression.ZipFile]::OpenRead($archivePath)
+          try {
+            if (-not ($check.Entries | Where-Object { $_.FullName -match '/bin/odx-capture\.json$' })) { throw 'Final config missing' }
+            if (-not ($check.Entries | Where-Object { $_.FullName -match '/bin/odx-app\.exe$' })) { throw 'Final app missing' }
+          } finally { $check.Dispose() }
+          Write-Host 'Room autostop v2 portable Windows package created successfully'
+
+      - name: Upload program for user testing
+        uses: actions/upload-artifact@v4
+        with:
+          name: Game-Recorder-0.3.8-4min-ROOM-AUTOSTOP-v2-Windows-x64
+          path: output/Game-Recorder-0.3.8-4min-ROOM-AUTOSTOP-v2.zip
+          if-no-files-found: error
+          retention-days: 7

@@ -51,7 +51,7 @@ jobs:
           $officialZip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'official/odx-capture-0.3.8-win-x64.zip').Path)
           try {
             $entries = @($officialZip.Entries | Where-Object {
-              $_.FullName -match '(^|/)bin/odx-capture\\.json$'
+              $_.FullName -match '(^|/)bin/odx-capture\.json$'
             })
             if ($entries.Count -ne 1) { throw "Expected one official odx-capture.json: found $($entries.Count)" }
             $original = $entries[0]
@@ -60,20 +60,20 @@ jobs:
             try { $sourceStream.CopyTo($buffer) } finally { $sourceStream.Dispose() }
             $configBytes = $buffer.ToArray()
             $config = [Text.Encoding]::UTF8.GetString($configBytes) | ConvertFrom-Json
-            if (-not $config.orchestrator -or $config.orchestrator -match 'example\\.com') {
+            if (-not $config.orchestrator -or $config.orchestrator -match 'example\.com') {
               throw 'Original distribution does not have a configured orchestrator'
             }
 
             $target = 'fixed/odx-capture-0.3.8-4min-win-x64/bin/odx-capture.json'
             if (-not (Test-Path $target)) { throw 'Built package has no expected bin/odx-capture.json' }
             $incorrect = Get-Content $target -Raw | ConvertFrom-Json
-            if ($incorrect.orchestrator -notmatch 'example\\.com') {
+            if ($incorrect.orchestrator -notmatch 'example\.com') {
               throw 'Unexpected prior package: refusing to replace configuration'
             }
             [IO.File]::WriteAllBytes((Join-Path $PWD $target), $configBytes)
 
             $check = [IO.File]::ReadAllBytes((Join-Path $PWD $target))
-            if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$configBytes, [byte[]]$check)) {
+            if ([Convert]::ToBase64String($configBytes) -ne [Convert]::ToBase64String($check)) {
               throw 'Recovered configuration does not match the official distribution'
             }
             Write-Host 'Official server configuration restored; credentials were not printed'
@@ -86,9 +86,9 @@ jobs:
             [IO.Compression.CompressionLevel]::Optimal, $false)
           $zipCheck = [IO.Compression.ZipFile]::OpenRead($outputZip)
           try {
-            $entry = $zipCheck.Entries | Where-Object { $_.FullName -match '(^|/)bin/odx-capture\\.json$' } | Select-Object -First 1
+            $entry = $zipCheck.Entries | Where-Object { $_.FullName -match '(^|/)bin/odx-capture\.json$' } | Select-Object -First 1
             if (-not $entry) { throw 'Final zip is missing the room configuration' }
-            if (-not ($zipCheck.Entries | Where-Object { $_.FullName -match '/Odx Capture\\.exe$' })) {
+            if (-not ($zipCheck.Entries | Where-Object { $_.FullName -match '/Odx Capture\.exe$' })) {
               throw 'Final zip is missing Odx Capture.exe'
             }
           } finally { $zipCheck.Dispose() }

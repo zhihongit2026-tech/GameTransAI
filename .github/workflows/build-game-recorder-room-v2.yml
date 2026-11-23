@@ -31,7 +31,7 @@ jobs:
         run: |
           $patches = @(
             @{ Source = 'build-game-recorder/recording-timer-4min.patch.gz.b64'; Hash = '9d4dea8e62bbe887b91b1354971322774a08904e33b8f17fc32941a1170a367e' },
-            @{ Source = 'roomfix/host-autostop-room-4min.patch.gz.b64'; Hash = '989dd02bddeeb7368f7551aec221bb679dd867274be8f856b3f6cdd44e3f5262' }
+            @{ Source = 'roomfix/host-autostop-room-4min.patch.gz.b64'; Hash = 'f7128cd51f7ae6255efdb1b9f7e7410040bef7159cdf365edcc5e37f52f80ae0' }
           )
           foreach ($p in $patches) {
             $compressed = [Convert]::FromBase64String((Get-Content $p.Source -Raw).Trim())

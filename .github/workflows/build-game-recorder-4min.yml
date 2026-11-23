@@ -1,0 +1,97 @@
+name: Game Recorder v0.3.8 - 4 minute Windows EXE
+
+on:
+  push:
+    branches: [build/game-recorder-0.3.8-4min]
+    paths:
+      - .github/workflows/build-game-recorder-4min.yml
+      - build-game-recorder/**
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout isolated build branch
+        uses: actions/checkout@v4
+
+      - name: Fetch exact upstream v0.3.8 tag
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch capture-v0.3.8 https://github.com/trquoccuong/Game-Recorder.git upstream
+          $actual = (git -C upstream rev-parse HEAD).Trim()
+          if ($actual -ne '657f49a17afba1e36b05921b15127f28b389fc2f') {
+            throw "Unexpected upstream tag commit: $actual"
+          }
+
+      - name: Decode and verify timer patch
+        shell: pwsh
+        run: |
+          $b64 = (Get-Content build-game-recorder/recording-timer-4min.patch.gz.b64 -Raw).Trim()
+          $compressed = [Convert]::FromBase64String($b64)
+          $stream = [IO.MemoryStream]::new($compressed)
+          $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionMode]::Decompress)
+          $out = [IO.MemoryStream]::new()
+          $gzip.CopyTo($out)
+          $gzip.Dispose()
+          $stream.Dispose()
+          [IO.File]::WriteAllBytes('timer.patch', $out.ToArray())
+          $hash = (Get-FileHash 'timer.patch' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '9d4dea8e62bbe887b91b1354971322774a08904e33b8f17fc32941a1170a367e') {
+            throw "Patch digest mismatch: $hash"
+          }
+          git -C upstream apply --check ../timer.patch
+          git -C upstream apply ../timer.patch
+          git -C upstream diff --check
+          Write-Host 'Source patch applied cleanly to exact upstream version'
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: upstream/capture/dotnet/global.json
+
+      - name: Build Windows UI and orchestrator
+        working-directory: upstream/capture/dotnet
+        shell: pwsh
+        run: |
+          dotnet build src/Apps/Odx.App/Odx.App.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'WPF application build failed' }
+          dotnet build src/Apps/Odx.Orchestrator/Odx.Orchestrator.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Orchestrator build failed' }
+
+      - name: Run .NET tests
+        working-directory: upstream/capture/dotnet
+        shell: pwsh
+        run: |
+          dotnet test tests/Odx.Tests/Odx.Tests.csproj -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw '.NET tests failed' }
+
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          update: false
+          install: make diffutils mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm mingw-w64-ucrt-x86_64-pkgconf
+
+      - uses: actions/cache@v4
+        with:
+          path: upstream/capture/dotnet/.cache/ffmpeg-*
+          key: game-recorder-ffmpeg-${{ hashFiles('upstream/capture/dotnet/ffmpeg/build-ffmpeg.sh') }}
+
+      - name: Publish self-contained portable EXEs
+        working-directory: upstream/capture/dotnet
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          ./publish.ps1 -Version 0.3.8-4min -WithOrchestrator
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
+
+      - name: Upload complete Windows program
+        uses: actions/upload-artifact@v4
+        with:
+          name: Game-Recorder-0.3.8-4min-Windows-x64
+          path: upstream/capture/dotnet/dist/odx-capture-0.3.8-4min-win-x64.zip
+          if-no-files-found: error
+          retention-days: 7

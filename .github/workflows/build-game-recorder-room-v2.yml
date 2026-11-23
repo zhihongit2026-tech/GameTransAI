@@ -1,0 +1,149 @@
+name: Game Recorder 0.3.8 - Room auto-stop 4 minutes (v2)
+
+on:
+  push:
+    branches: [build/game-recorder-0.3.8-4min]
+    paths:
+      - .github/workflows/build-game-recorder-room-v2.yml
+      - roomfix/**
+  workflow_dispatch:
+
+jobs:
+  build-and-verify:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout isolated build tools
+        uses: actions/checkout@v4
+
+      - name: Clone pinned official source
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch capture-v0.3.8 https://github.com/trquoccuong/Game-Recorder.git upstream
+          $commit = (git -C upstream rev-parse HEAD).Trim()
+          if ($commit -ne '657f49a17afba1e36b05921b15127f28b389fc2f') {
+            throw "Unexpected upstream commit $commit"
+          }
+
+      - name: Apply verified recording timer and room fix
+        shell: pwsh
+        run: |
+          $patches = @(
+            @{ Source = 'build-game-recorder/recording-timer-4min.patch.gz.b64'; Hash = '9d4dea8e62bbe887b91b1354971322774a08904e33b8f17fc32941a1170a367e' },
+            @{ Source = 'roomfix/host-autostop-room-4min.patch.gz.b64'; Hash = '989dd02bddeeb7368f7551aec221bb679dd867274be8f856b3f6cdd44e3f5262' }
+          )
+          foreach ($p in $patches) {
+            $compressed = [Convert]::FromBase64String((Get-Content $p.Source -Raw).Trim())
+            $stream = [IO.MemoryStream]::new($compressed)
+            $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionMode]::Decompress)
+            $out = [IO.MemoryStream]::new()
+            try { $gzip.CopyTo($out) } finally { $gzip.Dispose(); $stream.Dispose() }
+            [IO.File]::WriteAllBytes('current.patch', $out.ToArray())
+            $actual = (Get-FileHash current.patch -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $p.Hash) { throw "Patch digest mismatch for $($p.Source)" }
+            git -C upstream apply --check ../current.patch
+            if ($LASTEXITCODE -ne 0) { throw "Patch does not apply: $($p.Source)" }
+            git -C upstream apply ../current.patch
+            if ($LASTEXITCODE -ne 0) { throw "Patch failed: $($p.Source)" }
+          }
+          git -C upstream diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Source patch whitespace errors' }
+          Write-Host 'Pinned source plus 2 patches validated and applied'
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: upstream/capture/dotnet/global.json
+
+      - name: Build application and orchestrator on Windows
+        shell: pwsh
+        working-directory: upstream/capture/dotnet
+        run: |
+          dotnet build src/Apps/Odx.App/Odx.App.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Windows client build failed' }
+          dotnet build src/Apps/Odx.Orchestrator/Odx.Orchestrator.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Orchestrator build failed' }
+
+      - name: Run existing regression tests
+        shell: pwsh
+        working-directory: upstream/capture/dotnet
+        run: |
+          dotnet test tests/Odx.Tests/Odx.Tests.csproj -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
+
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          update: false
+          install: make diffutils mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm mingw-w64-ucrt-x86_64-pkgconf
+
+      - uses: actions/cache@v4
+        with:
+          path: upstream/capture/dotnet/.cache/ffmpeg-*
+          key: game-recorder-ffmpeg-${{ hashFiles('upstream/capture/dotnet/ffmpeg/build-ffmpeg.sh') }}
+
+      - name: Publish self-contained 64-bit Windows executable package
+        shell: pwsh
+        working-directory: upstream/capture/dotnet
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          ./publish.ps1 -Version 0.3.8-4min-room-v2 -WithOrchestrator
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+
+      - name: Restore the original released server connection configuration
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path official -Force | Out-Null
+          gh release download capture-v0.3.8 -R trquoccuong/Game-Recorder -p odx-capture-0.3.8-win-x64.zip -D official
+          if ($LASTEXITCODE -ne 0) { throw 'Official release download failed' }
+          $originalZip = 'official/odx-capture-0.3.8-win-x64.zip'
+          $actual = (Get-FileHash $originalZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne '4e10a47ec7c4b51ab316ed8a4ae41646157ffb1165e85bc82e1463d78ed9d741') {
+            throw 'Official v0.3.8 package checksum mismatch'
+          }
+          Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $originalZip).Path)
+          try {
+            $configs = @($archive.Entries | Where-Object { $_.FullName -match '(^|/)bin/odx-capture\.json$' })
+            if ($configs.Count -ne 1) { throw "Expected one config file, got $($configs.Count)" }
+            $stream = $configs[0].Open()
+            $buffer = [IO.MemoryStream]::new()
+            try { $stream.CopyTo($buffer) } finally { $stream.Dispose() }
+            $bytes = $buffer.ToArray()
+          } finally { $archive.Dispose() }
+          $config = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+          if (-not $config.orchestrator -or $config.orchestrator -match 'example\.com') {
+            throw 'No real orchestrator in original release'
+          }
+          $root = 'upstream/capture/dotnet/dist/odx-capture-0.3.8-4min-room-v2-win-x64'
+          $target = Join-Path $root 'bin/odx-capture.json'
+          if (-not (Test-Path $target)) { throw 'Missing built app configuration' }
+          [IO.File]::WriteAllBytes((Join-Path $PWD $target), $bytes)
+          if (-not (Test-Path (Join-Path $root 'Odx Capture.exe'))) { throw 'Missing Odx Capture.exe' }
+          if (-not (Test-Path (Join-Path $root 'bin/odx-app.exe'))) { throw 'Missing odx-app.exe' }
+          $finalZip = Join-Path $PWD 'upstream/capture/dotnet/dist/odx-capture-0.3.8-4min-room-v2-win-x64.zip'
+          Remove-Item -Force $finalZip
+          [IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $PWD $root), $finalZip,
+              [IO.Compression.CompressionLevel]::Optimal, $true)
+          $check = [IO.Compression.ZipFile]::OpenRead($finalZip)
+          try {
+            if (-not ($check.Entries | Where-Object { $_.FullName -match '/bin/odx-capture\.json$' })) {
+              throw 'Configuration is missing from the final package'
+            }
+            if (-not ($check.Entries | Where-Object { $_.FullName -match '/Odx Capture\.exe$' })) {
+              throw 'Launcher is missing from the final package'
+            }
+          } finally { $check.Dispose() }
+          Write-Host 'V2 Windows package produced with original real room configuration'
+
+      - name: Publish downloadable Windows archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: Game-Recorder-0.3.8-4min-ROOM-AUTOSTOP-v2-Windows-x64
+          path: upstream/capture/dotnet/dist/odx-capture-0.3.8-4min-room-v2-win-x64.zip
+          if-no-files-found: error
+          retention-days: 7

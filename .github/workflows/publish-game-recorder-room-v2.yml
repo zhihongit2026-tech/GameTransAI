@@ -1,0 +1,139 @@
+name: Publish Game Recorder 0.3.8 four-minute Windows release
+
+on:
+  push:
+    branches: [build/game-recorder-0.3.8-4min]
+    paths: [.github/workflows/publish-game-recorder-room-v2.yml]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download tested Windows v2 package
+        uses: actions/download-artifact@v4
+        with:
+          name: Game-Recorder-0.3.8-4min-ROOM-AUTOSTOP-v2-Windows-x64
+          run-id: 45186015099
+          github-token: ${{ github.token }}
+          path: verified
+
+      - name: Verify and prepare safe public Windows release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+          $source = 'verified/odx-capture-0.3.8-4min-room-v2-win-x64.zip'
+          if (-not (Test-Path $source)) { throw 'Verified v2 ZIP missing' }
+          $expanded = Join-Path $PWD 'expanded'
+          [IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path $source).Path, $expanded)
+          $base = 'expanded/odx-capture-0.3.8-4min-room-v2-win-x64'
+          foreach ($required in @(
+            'Odx Capture.exe', 'bin/odx-app.exe', 'bin/odx.exe',
+            'bin/odx-capture.json', 'bin/ffmpeg/ffmpeg.exe'
+          )) {
+            if (-not (Test-Path (Join-Path $base $required))) {
+              throw "Missing required binary: $required"
+            }
+          }
+          # Public repository: never republish the team's private access_key.
+          $configPath = Join-Path $base 'bin/odx-capture.json'
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.orchestrator -or $config.orchestrator -match 'example\.com') {
+            throw 'Release room endpoint invalid'
+          }
+          if ($config.PSObject.Properties['access_key']) {
+            $config.access_key = ''
+            $config | ConvertTo-Json -Depth 16 | Set-Content $configPath -Encoding utf8
+          }
+          if ((Get-Content $configPath -Raw | ConvertFrom-Json).access_key) {
+            throw 'Credential redaction failed'
+          }
+          $readme = @'
+          GAME RECORDER 0.3.8 FOUR-MINUTE ROOM FIX V2
+          Windows 10/11 x64. Unzip completely, then run Odx Capture.exe.
+
+          Changes: stopwatch 00:00/04:00, solo 4-minute automatic stop,
+          host's automatic round_end after 4 minutes in multiplayer room.
+          The capture engine, FFmpeg, profiles and other features are kept.
+
+          ROOM ACCESS: This release is in a PUBLIC GitHub repository.
+          The private access_key is deliberately removed.
+          For protected rooms copy your own authorized bin/odx-capture.json
+          from a previous working installation into this program's bin/
+          directory, or configure an authorized key from the administrator.
+          Do not share the key in screenshots, forums or issues.
+
+          Original: https://github.com/trquoccuong/Game-Recorder
+          Build based on capture-v0.3.8.
+          Tests passed; real room behavior needs field validation.
+          '@
+          [IO.File]::WriteAllText((Join-Path $base 'README-4MIN.txt'),
+              $readme, [Text.UTF8Encoding]::new($false))
+          New-Item -ItemType Directory -Path output -Force | Out-Null
+          $final = Join-Path $PWD 'output/Game-Recorder-0.3.8-4min-ROOM-AUTOSTOP-v2-Windows-x64.zip'
+          [IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $PWD 'expanded'), $final,
+              [IO.Compression.CompressionLevel]::Optimal, $false)
+          $zip = [IO.Compression.ZipFile]::OpenRead($final)
+          try {
+            foreach ($suffix in @(
+              '/Odx Capture.exe', '/bin/odx-app.exe', '/bin/odx.exe',
+              '/bin/ffmpeg/ffmpeg.exe', '/bin/odx-capture.json', '/README-4MIN.txt'
+            )) {
+              if (-not ($zip.Entries | Where-Object {
+                $_.FullName.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)
+              } | Select-Object -First 1)) {
+                throw "Missing final ZIP entry: $suffix"
+              }
+            }
+          } finally { $zip.Dispose() }
+          $hash = (Get-FileHash $final -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$final.sha256", "$hash  $(Split-Path $final -Leaf)", [Text.UTF8Encoding]::new($false))
+          Write-Host 'Windows public release ZIP checked, credential removed, checksum created'
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'game-recorder-v0.3.8-4min-room-v2'
+          $zip = 'output/Game-Recorder-0.3.8-4min-ROOM-AUTOSTOP-v2-Windows-x64.zip'
+          $checksum = "$zip.sha256"
+          $notes = @'
+          # Game Recorder 0.3.8 - four-minute Room Auto-stop v2
+
+          **Download Windows x64 ZIP, extract all files, run Odx Capture.exe.**
+
+          Includes corrected elapsed timer, automatic 4-minute solo stop,
+          and automatic round-end sent by the room host at four minutes.
+
+          The upstream game recorder and its FFmpeg tools, game profiles and
+          normal stop/start workflow are retained.
+
+          The GitHub repository is PUBLIC. To avoid exposing the original
+          room server access key, this release deliberately omits the key.
+          For protected rooms, copy the authorized bin/odx-capture.json
+          from the previous working client or configure the secret locally.
+          Do not publicly share your access key.
+
+          Build and .NET tests passed on Windows. Multiplayer stopping still
+          needs a real-world check on your orchestrator server.
+
+          Original project: https://github.com/trquoccuong/Game-Recorder
+          Changes/build: https://github.com/zhihongit2026-tech/GameTransAI/tree/build/game-recorder-0.3.8-4min
+          '@
+          [IO.File]::WriteAllText('RELEASE_NOTES.md', $notes, [Text.UTF8Encoding]::new($false))
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 1>$null 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zip $checksum --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag $zip $checksum --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Game Recorder 0.3.8 - Room Auto-stop 4min (v2)' --notes-file RELEASE_NOTES.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release failed' }
+          gh release view $tag --repo $env:GITHUB_REPOSITORY --json url
